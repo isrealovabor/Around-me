@@ -1,0 +1,21 @@
+import { randomUUID } from 'node:crypto'
+import { prisma } from '../lib/prisma'
+import { NotificationService } from '../notifications/service'
+import { InMemoryBackgroundJobQueue } from '../jobs/job-queue'
+
+const suffix = randomUUID(); const location = await prisma.location.create({ data: { name: `Feed Check ${suffix}`, slug: `feed-check-${suffix}`, type: 'NEIGHBOURHOOD', countryCode: 'NG' } }); const community = await prisma.community.create({ data: { name: `Feed Check ${suffix}`, slug: `feed-check-${suffix}`, locationId: location.id } }); const author = await prisma.user.create({ data: { email: `feed-author-${suffix}@example.test`, name: 'Feed Author', passwordHash: 'development-only' } }); const other = await prisma.user.create({ data: { email: `feed-other-${suffix}@example.test`, name: 'Feed Other', passwordHash: 'development-only' } })
+try {
+  await prisma.communityMembership.createMany({ data: [{ userId: author.id, communityId: community.id }, { userId: other.id, communityId: community.id }] })
+  const post = await prisma.post.create({ data: { authorId: author.id, communityId: community.id, body: 'Development-only community post', category: 'GENERAL', imageUrls: [], visibility: 'COMMUNITY', moderationStatus: 'ACTIVE', urgencyStatus: 'NORMAL', locationLabel: 'Feed Check area' } })
+  await prisma.post.create({ data: { authorId: author.id, communityId: community.id, body: 'Second development-only post', category: 'TRAFFIC', imageUrls: [], visibility: 'NIGERIA', moderationStatus: 'ACTIVE', urgencyStatus: 'NORMAL' } })
+  const comment = await prisma.comment.create({ data: { postId: post.id, authorId: other.id, body: 'Development-only comment' } })
+  const firstReaction = await prisma.reaction.upsert({ where: { postId_userId_type: { postId: post.id, userId: other.id, type: 'HELPFUL' } }, create: { postId: post.id, userId: other.id, type: 'HELPFUL' }, update: {} })
+  const repeatedReaction = await prisma.reaction.upsert({ where: { postId_userId_type: { postId: post.id, userId: other.id, type: 'HELPFUL' } }, create: { postId: post.id, userId: other.id, type: 'HELPFUL' }, update: {} })
+  const report = await prisma.contentReport.create({ data: { reporterId: other.id, targetType: 'POST', postId: post.id, reason: 'SPAM' } })
+  const local = await prisma.post.findMany({ where: { communityId: community.id, isRemoved: false }, take: 1, orderBy: { createdAt: 'desc' } }); const nigeria = await prisma.post.findMany({ where: { isRemoved: false, moderationStatus: 'ACTIVE' }, take: 10 }); const next = await prisma.post.findMany({ where: { communityId: community.id }, cursor: { id: local[0].id }, skip: 1, take: 1, orderBy: { createdAt: 'desc' } })
+  const permissionBlocked = (await prisma.post.updateMany({ where: { id: post.id, authorId: other.id }, data: { body: 'not allowed' } })).count === 0
+  const jobs = new InMemoryBackgroundJobQueue(); const notifications = new NotificationService(jobs); const notification = await notifications.create({ userId: author.id, type: 'COMMENT', title: 'New comment', body: 'A neighbour commented on your post.', entityType: 'post', entityId: post.id, idempotencyKey: `feed-check:${comment.id}` })
+  console.info(JSON.stringify({ created: Boolean(post), retrieved: local.length === 1, communityFeed: local.length === 1, nigeriaFeed: nigeria.length >= 2, comment: Boolean(comment), reaction: firstReaction.id === repeatedReaction.id, pagination: next.length === 1, report: Boolean(report), permissionBlocked, notification: Boolean(notification), queued: Boolean(notification) }))
+} finally {
+  await prisma.contentReport.deleteMany({ where: { post: { communityId: community.id } } }); await prisma.reaction.deleteMany({ where: { post: { communityId: community.id } } }); await prisma.comment.deleteMany({ where: { post: { communityId: community.id } } }); await prisma.post.deleteMany({ where: { communityId: community.id } }); await prisma.communityMembership.deleteMany({ where: { communityId: community.id } }); await prisma.notification.deleteMany({ where: { userId: author.id } }); await prisma.user.deleteMany({ where: { id: { in: [author.id, other.id] } } }); await prisma.community.delete({ where: { id: community.id } }); await prisma.location.delete({ where: { id: location.id } })
+}

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/around_me_ci
+      DIRECT_URL: postgresql://ci:ci@localhost:5432/around_me_ci
+      AUTH_SESSION_SECRET: ci-only-session-secret-with-at-least-thirty-two-characters
+      APP_URL: http://localhost:5173
+      CORS_ORIGIN: http://localhost:5173
+      PORT: "3000"
+      ENABLE_AI: "false"
+      ENABLE_EMAIL_DELIVERY: "false"
+      ENABLE_VERIFICATION: "false"
+      ENABLE_BUSINESS_CLAIMS: "false"
+      BETA_MODE: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:intelligence
+      - run: npm run db:validate
+      - run: npm run build
