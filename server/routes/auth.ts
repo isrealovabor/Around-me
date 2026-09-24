@@ -1,9 +1,11 @@
 import { Hono } from 'hono'
-import { deleteCookie, setCookie } from 'hono/cookie'
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { Prisma } from '@prisma/client'
+import { z } from 'zod'
 import type { ServerEnv } from '../config/env'
 import { hashPassword, verifyPassword } from '../auth/password'
-import { createSessionToken } from '../auth/session'
+import { createSessionToken, readSessionToken } from '../auth/session'
+import { requireActiveUser } from '../auth/authorization'
 import { AUTH_TOKEN_TYPES, createRawAuthToken, hashAuthToken } from '../auth/tokens'
 import { ApiError } from '../lib/errors'
 import { prisma } from '../lib/prisma'
@@ -14,6 +16,7 @@ import { loginInput, registerInput, resetPasswordInput, resetRequestInput, token
 const verificationLifetimeMs = 24 * 60 * 60 * 1000
 const resetLifetimeMs = 60 * 60 * 1000
 const genericResetResponse = { message: "If an account exists for that email, we've sent a reset link." }
+const communitySelectionInput = z.object({ community: z.string().trim().min(2).max(100), state: z.string().trim().min(2).max(100).optional(), lga: z.string().trim().min(2).max(100).optional() })
 export function sessionCookieOptions(env: ServerEnv) {
   const production = env.NODE_ENV === 'production'
   return { httpOnly: true, secure: production, sameSite: production ? 'None' as const : 'Lax' as const, path: '/', maxAge: 7 * 24 * 60 * 60 }
@@ -35,6 +38,50 @@ export function createAuthRoutes(dependencies: { env: ServerEnv; email?: Transac
   const app = new Hono()
   const rateLimitStore = dependencies.rateLimitStore ?? new MemoryRateLimitStore()
   const requireEmail = () => { if (!dependencies.email) throw new ApiError(503, 'Email delivery is not configured', 'EMAIL_NOT_CONFIGURED'); return dependencies.email }
+  /** The browser uses this as its single source of truth. Demo records never imply a session. */
+  app.get('/session', async context => {
+    const token = getCookie(context, 'around_me_session')
+    if (!token) return context.json({ authenticated: false })
+    try {
+      const principal = await readSessionToken(token, dependencies.env.AUTH_SESSION_SECRET)
+      const user = await prisma.user.findUnique({
+        where: { id: principal.userId },
+        include: { profile: { include: { primaryCommunity: { include: { location: { include: { parent: true } } } } } } },
+      })
+      if (!user || user.status !== 'ACTIVE') return context.json({ authenticated: false })
+      const community = user.profile?.primaryCommunity
+      return context.json({
+        authenticated: true,
+        user: {
+          id: user.id,
+          name: user.profile?.displayName ?? user.name,
+          emailVerified: Boolean(user.emailVerifiedAt),
+          primaryCommunity: community ? {
+            id: community.id,
+            name: community.name,
+            slug: community.slug,
+            location: { name: community.location.name, parentName: community.location.parent?.name },
+          } : null,
+          selectedLocation: user.profile?.publicLocationLabel ?? null,
+        },
+      })
+    } catch { return context.json({ authenticated: false }) }
+  })
+  app.patch('/session/location', async context => {
+    requireTrustedOrigin(context, dependencies.env)
+    const token = getCookie(context, 'around_me_session')
+    if (!token) throw new ApiError(401, 'Please sign in to choose a community', 'UNAUTHENTICATED')
+    let principal
+    try { principal = requireActiveUser(await readSessionToken(token, dependencies.env.AUTH_SESSION_SECRET)) } catch { throw new ApiError(401, 'Please sign in to choose a community', 'UNAUTHENTICATED') }
+    const input = communitySelectionInput.parse(await context.req.json())
+    const matchingCommunity = await prisma.community.findFirst({ where: { name: { equals: input.community, mode: 'insensitive' } } })
+    await prisma.profile.upsert({
+      where: { userId: principal.userId },
+      create: { userId: principal.userId, displayName: (await prisma.user.findUniqueOrThrow({ where: { id: principal.userId } })).name, publicLocationLabel: input.community, primaryCommunityId: matchingCommunity?.id, onboardingStatus: 'LOCATION_SELECTED', onboardingStep: 3, onboardingCompletedAt: new Date() },
+      update: { publicLocationLabel: input.community, primaryCommunityId: matchingCommunity?.id, onboardingStatus: 'LOCATION_SELECTED', onboardingStep: 3, onboardingCompletedAt: new Date() },
+    })
+    return context.json({ status: 'saved', community: input.community, matchedCommunity: Boolean(matchingCommunity) })
+  })
   app.post('/register', async context => {
     requireTrustedOrigin(context, dependencies.env)
     const input = registerInput.parse(await context.req.json())
