@@ -8,11 +8,15 @@ import {
 } from 'lucide-react'
 import { NIGERIAN_STATES, PILOT } from './config/pilot'
 import { LocationPicker } from './maps/LocationPicker'
+import { MapView, type PublicMapMarker } from './maps/MapView'
 import { WeatherCard } from './weather/WeatherCard'
 import { resolveHomeContext, type CommunityContext, type CurrentUser } from './lib/home-context'
+import { LAGOS_LGAS } from './config/lagos'
+import { NIGERIA_GEOGRAPHY, type MapCenter } from './config/geography'
+import { mapboxAccessToken } from './maps/config'
 
 type Category = 'General' | 'Question' | 'Safety' | 'Traffic' | 'Emergency' | 'Lost & Found' | 'Marketplace' | 'Services' | 'Events' | 'Jobs' | 'Local Issues'
-type Post = { id: number; name: string; initials: string; tone: string; time: string; category: Category; text: string; reactions: number; comments: number; image?: string; verified?: boolean; location?: string; saved?: boolean }
+type Post = { id: string | number; name: string; initials: string; tone: string; time: string; category: Category; text: string; reactions: number; comments: number; image?: string; verified?: boolean; location?: string; saved?: boolean }
 type AlertStatus = 'Reported' | 'Community Confirmed' | 'Verified' | 'Resolved'
 type Alert = { id: number; category: string; title: string; description: string; location: string; time: string; status: AlertStatus; confirmations: number; confidence: 'Low' | 'Developing' | 'High'; sourceType: 'Community report' | 'Official source' | 'Moderated report'; requiresReview?: boolean }
 type Service = { id: number; name: string; category: string; description: string; area: string; phone: string; recommendations: number; verified?: boolean; image: string }
@@ -47,6 +51,19 @@ async function readCurrentSession(): Promise<CurrentUser | null> {
   return payload.authenticated && payload.user ? payload.user : null
 }
 
+const apiCategoryLabels: Record<string, Category> = { GENERAL: 'General', QUESTION: 'Question', SAFETY: 'Safety', TRAFFIC: 'Traffic', EMERGENCY: 'Emergency', LOST_FOUND: 'Lost & Found', MARKETPLACE: 'Marketplace', SERVICES: 'Services', EVENTS: 'Events', JOBS: 'Jobs', LOCAL_ISSUES: 'Local Issues' }
+const communitySlug = (name: string) => name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
+async function readPublicCommunityPosts(slug: string): Promise<Post[]> {
+  const communityResponse = await fetch(`${apiBaseUrl}/communities/${encodeURIComponent(slug)}`)
+  if (!communityResponse.ok) return []
+  const communityPayload = await communityResponse.json() as { community?: { id?: string } }
+  if (!communityPayload.community?.id) return []
+  const postsResponse = await fetch(`${apiBaseUrl}/posts?scope=community&communityId=${encodeURIComponent(communityPayload.community.id)}`)
+  if (!postsResponse.ok) return []
+  const payload = await postsResponse.json() as { posts?: Array<{ id: string; body: string; category: string; createdAt: string; locationLabel?: string | null; author: { name: string; verificationStatus?: string }; _count: { comments: number; reactions: number } }> }
+  return (payload.posts ?? []).map((post, index) => ({ id: post.id, name: post.author.name, initials: post.author.name.slice(0, 2).toUpperCase(), tone: ['navy', 'teal', 'purple'][index % 3], time: new Date(post.createdAt).toLocaleDateString('en-NG', { day: 'numeric', month: 'short' }), category: apiCategoryLabels[post.category] ?? 'General', text: post.body, reactions: post._count.reactions, comments: post._count.comments, location: post.locationLabel ?? undefined, verified: post.author.verificationStatus === 'VERIFIED' }))
+}
+
 function Avatar({ initials, tone }: { initials: string; tone: string }) { return <div className={`avatar ${tone}`}>{initials}</div> }
 
 export default function App() {
@@ -63,6 +80,7 @@ export default function App() {
   const [view, setView] = useState<'home' | 'explore' | 'alerts' | 'services' | 'marketplace' | 'notifications' | 'admin' | 'profile' | 'community'>('home')
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
+  const [exploreLocation, setExploreLocation] = useState<(typeof LAGOS_LGAS)[number] | null>(null)
   const [authDeepLink, setAuthDeepLink] = useState<{ type: 'verify' | 'reset'; token: string } | undefined>()
   const unreadNotificationCount = notifications.filter(notification => notification.unread).length
   const homeContext = resolveHomeContext(currentUser, selectedCommunity)
@@ -90,6 +108,14 @@ export default function App() {
     if (type && token) { setAuthDeepLink({ type, token }); setShowAuth(true); setAuthMode(type === 'reset' ? 'sign in' : 'join') }
   }, [])
 
+  useEffect(() => {
+    const slug = community?.slug ?? (communityName ? communitySlug(communityName) : '')
+    if (!slug) { setPosts([]); return }
+    let active = true
+    void readPublicCommunityPosts(slug).then(posts => { if (active) setPosts(posts) }).catch(() => { if (active) setPosts([]) })
+    return () => { active = false }
+  }, [community?.slug, communityName])
+
   const displayedPosts = useMemo(() => activeCategory === 'All' ? posts : posts.filter(p => p.category === activeCategory), [posts, activeCategory])
   const publish = (text: string, category: Category) => {
     if (!currentUser || !communityName) { setShowAuth(true); setAuthMode('sign in'); return }
@@ -97,25 +123,30 @@ export default function App() {
     setShowComposer(false); setNotice(`Your update is now live in ${communityName}.`)
     window.setTimeout(() => setNotice(''), 3500)
   }
+  const beginCreatePost = () => {
+    if (!authenticated) { setNotice('Sign in to share with your community.'); setAuthMode('sign in'); setShowAuth(true); return }
+    if (!communityName) { setNotice('Choose a community before sharing an update.'); setShowOnboarding(true); return }
+    setShowComposer(true)
+  }
   return <div className="app-shell">
     <header className="topbar">
       <a className="brand" href="#top" aria-label="Around Me home"><span className="brand-mark"><MapPin size={22}/></span><span>Around<span>Me</span></span></a>
       <button className="community-switcher" onClick={() => setCommunityOpen(!communityOpen)}><MapPin size={17}/><span>{communityName ?? 'Choose location'}</span><ChevronDown size={16}/></button>
       {communityOpen && <div className="community-menu"><b>{communityName ? 'Current community' : 'Find your community'}</b>{communityName && <button onClick={() => setCommunityOpen(false)}>✓ {communityName}</button>}<button className="add-community" onClick={() => { setCommunityOpen(false); setShowOnboarding(true) }}><Plus size={15}/> Find a Nigerian community</button></div>}
-      <label className="search"><Search size={18}/><input value={searchTerm} onChange={e => setSearchTerm(e.target.value)} placeholder="Search communities, posts, services..."/></label>
+      <label className="search"><Search size={18}/><input value={searchTerm} onChange={e => setSearchTerm(e.target.value)} onKeyDown={event => { if (event.key === 'Enter') setView('explore') }} placeholder="Search communities, posts, services..."/></label>
       <div className="top-actions">{authenticated && <button className="icon-button" onClick={() => setView('notifications')} aria-label={unreadNotificationCount ? `${unreadNotificationCount} unread notifications` : 'Notifications'}><Bell size={20}/>{unreadNotificationCount > 0 && <i>{unreadNotificationCount}</i>}</button>}{authenticated ? <button className="login" onClick={() => setView('profile')}><Avatar initials={currentUser!.name.slice(0, 2).toUpperCase()} tone="navy"/></button> : <><button className="login" onClick={() => {setAuthMode('sign in');setShowAuth(true)}}>Sign in</button><button className="join" onClick={() => {setAuthMode('join');setShowAuth(true)}}>Join your community</button></>}<button className="mobile-menu"><Menu/></button></div>
     </header>
 
     <main id="top" className="layout">
       <aside className="left-rail">
-        <nav><a className={view === 'home' ? 'selected' : ''} onClick={() => setView('home')}><Home size={20}/> Home</a><a className={view === 'explore' ? 'selected' : ''} onClick={() => setView('explore')}><Compass size={20}/> Explore</a><a className={view === 'alerts' ? 'selected' : ''} onClick={() => setView('alerts')}><Siren size={20}/> Alerts <span className="nav-count">{starterAlerts.filter(a => a.status !== 'Resolved').length}</span></a><a className={view === 'marketplace' ? 'selected' : ''} onClick={() => setView('marketplace')}><ShoppingBag size={20}/> Marketplace</a><a className={view === 'services' ? 'selected' : ''} onClick={() => setView('services')}><Wrench size={20}/> Services</a>{authenticated && <a className={view === 'profile' ? 'selected' : ''} onClick={() => setView('profile')}><UserRound size={20}/> Profile</a>}</nav>
+        <nav><button className={view === 'home' ? 'selected' : ''} onClick={() => setView('home')}><Home size={20}/> Home</button><button className={view === 'explore' ? 'selected' : ''} onClick={() => setView('explore')}><Compass size={20}/> Explore</button><button className={view === 'alerts' ? 'selected' : ''} onClick={() => setView('alerts')}><Siren size={20}/> Alerts <span className="nav-count">{starterAlerts.filter(a => a.status !== 'Resolved').length}</span></button><button className={view === 'marketplace' ? 'selected' : ''} onClick={() => setView('marketplace')}><ShoppingBag size={20}/> Marketplace</button><button className={view === 'services' ? 'selected' : ''} onClick={() => setView('services')}><Wrench size={20}/> Services</button>{authenticated && <button className={view === 'profile' ? 'selected' : ''} onClick={() => setView('profile')}><UserRound size={20}/> Profile</button>}</nav>
         <div className="rail-section"><p className="eyebrow">YOUR COMMUNITY</p>{communityName ? <><a className="community-link"><span className="community-icon">{communityName.slice(0, 2).toUpperCase()}</span>{communityName}</a><button className="text-button" onClick={() => setShowOnboarding(true)}><Plus size={17}/> Choose another community</button></> : <><p>Find updates, services and alerts near you.</p><button className="text-button" onClick={() => setShowOnboarding(true)}><Plus size={17}/> Find your community</button></>}</div>
-        <div className="rail-footer"><a>About Around Me</a><a>Guidelines</a><a>Help centre</a>{authenticated && <a className="admin-link" onClick={() => setView('admin')}><LayoutDashboard size={14}/> Admin dashboard</a>}<p>© 2026 Around Me</p></div>
+        <div className="rail-footer"><span>About Around Me</span><span>Guidelines</span><span>Help centre</span>{authenticated && <button className="admin-link" onClick={() => setView('admin')}><LayoutDashboard size={14}/> Admin dashboard</button>}<p>© 2026 Around Me</p></div>
       </aside>
 
       <section className="feed">
         {view === 'home' ? <>
-        {!sessionReady ? <div className="empty"><Sparkles/><h3>Loading Around Me</h3></div> : !communityName ? <PublicHome authenticated={authenticated} onChoose={() => setShowOnboarding(true)} onSignIn={() => { setAuthMode('sign in'); setShowAuth(true) }} /> : <>
+        {!sessionReady ? <div className="empty"><Sparkles/><h3>Loading Around Me</h3></div> : !communityName ? <PublicHome authenticated={authenticated} onChoose={() => setShowOnboarding(true)} onSignIn={() => { setAuthMode('sign in'); setShowAuth(true) }} onCreate={beginCreatePost} onNavigate={setView} /> : <>
         {communityName === PILOT.community && <div className="demo-notice"><Sparkles size={15}/><span>Ojo is an early launch community. Content appears here because you selected Ojo.</span></div>}
         <div className="feed-heading"><div><p className="eyebrow">NEIGHBOURHOOD FEED</p><h1>What’s happening around {communityName}?</h1><p><MapPin size={14}/> {community?.location?.parentName ? `${community.location.parentName} · ` : ''}{community?.location?.name ?? communityName}</p></div>{authenticated && <button className="create-button" onClick={() => setShowComposer(true)}><Plus size={19}/> Create post</button>}</div>
         <AroundMeNow posts={posts} community={communityName} onNavigate={setView}/>
@@ -129,7 +160,7 @@ export default function App() {
           : view === 'services' ? <ServicesPage community={communityName ?? 'Nigeria'} setNotice={setNotice}/>
           : view === 'marketplace' ? <MarketplacePage community={communityName ?? 'Nigeria'} setNotice={setNotice}/>
           : view === 'notifications' ? <NotificationsPage/>
-          : view === 'explore' ? <ExplorePage community={communityName} onNavigate={setView} searchTerm={searchTerm} onChoose={() => setShowOnboarding(true)}/>
+          : view === 'explore' ? <ExplorePage community={communityName} onNavigate={setView} searchTerm={searchTerm} onChoose={() => setShowOnboarding(true)} exploreLocation={exploreLocation} setExploreLocation={setExploreLocation}/>
           : view === 'profile' && currentUser ? <ProfilePage userName={currentUser.name} community={communityName} posts={posts} onOnboard={() => setShowOnboarding(true)} onLogout={async () => { try { await authRequest('/auth/logout', { method: 'POST' }) } finally { setCurrentUser(null); setSelectedCommunity(null); setPosts([]); setView('home'); void refreshSession() } }} />
           : view === 'community' && communityName ? <CommunityProfile community={communityName} posts={posts} onBack={() => setView('home')}/>
           : <AdminDashboard setNotice={setNotice}/>}
@@ -142,7 +173,7 @@ export default function App() {
         <section className="safety-note"><ShieldAlert size={18}/><p><b>Your location stays private.</b> We only show the community you choose—not your exact address.</p></section>
       </aside>
     </main>
-    <nav className="mobile-bottom" aria-label="Mobile navigation"><button className={view === 'home' ? 'active' : ''} onClick={() => setView('home')}><Home/><span>Home</span></button><button className={view === 'explore' ? 'active' : ''} onClick={() => setView('explore')}><Compass/><span>Explore</span></button><button className="mobile-post" onClick={() => setShowComposer(true)}><Plus/><span>Post</span></button><button className={view === 'alerts' ? 'active' : ''} onClick={() => setView('alerts')}><Siren/><span>Alerts</span></button><button className={view === 'profile' ? 'active' : ''} onClick={() => setView('profile')}><UserRound/><span>Profile</span></button></nav>
+    <nav className="mobile-bottom" aria-label="Mobile navigation"><button className={view === 'home' ? 'active' : ''} onClick={() => setView('home')}><Home/><span>Home</span></button><button className={view === 'explore' ? 'active' : ''} onClick={() => setView('explore')}><Compass/><span>Explore</span></button><button className="mobile-post" onClick={beginCreatePost}><Plus/><span>Post</span></button><button className={view === 'alerts' ? 'active' : ''} onClick={() => setView('alerts')}><Siren/><span>Alerts</span></button><button className={view === 'profile' ? 'active' : ''} onClick={() => authenticated ? setView('profile') : (setAuthMode('sign in'), setShowAuth(true))}><UserRound/><span>Profile</span></button></nav>
     {notice && <div className="toast"><CheckCircle2 size={19}/>{notice}</div>}
     {showAuth && <AuthModal mode={authMode} deepLink={authDeepLink} close={() => {setShowAuth(false);setAuthDeepLink(undefined)}} onModeChange={setAuthMode} onAuthenticated={async () => { const user = await refreshSession(); setShowAuth(false); if (!user?.primaryCommunity) setShowOnboarding(true) }} />}
     {showOnboarding && <LocationOnboarding close={() => setShowOnboarding(false)} complete={async ({ primaryCommunity, state, lga }) => { if (currentUser) { await authRequest('/auth/session/location', { method: 'PATCH', body: JSON.stringify({ community: primaryCommunity, state, lga }) }); await refreshSession() } else setSelectedCommunity({ name: primaryCommunity, location: { name: lga || primaryCommunity, parentName: state || undefined } }); setShowOnboarding(false); setView('home'); setNotice(`Showing updates for ${primaryCommunity}.`) }} />}
@@ -154,10 +185,10 @@ function AroundMeNow({ posts, community, onNavigate }: { posts: Post[]; communit
   return <section className="now-panel"><div className="section-title"><div><p className="eyebrow">AROUND ME NOW · {community.toUpperCase()}</p><h2>From your community</h2></div><span>Platform activity only</span></div><div className="now-grid"><button onClick={() => onNavigate('alerts')}><Siren/><b>{alertCount ? `${alertCount} community reports` : 'No alerts right now'}</b><small>Reports appear after submission</small></button><button onClick={() => onNavigate('marketplace')}><ShoppingBag/><b>{starterListings.length ? `${starterListings.length} local listings` : `List an item near ${community}`}</b><small>Shared by neighbours</small></button><button onClick={() => onNavigate('services')}><Wrench/><b>Recommend a local service</b><small>Services near {community}</small></button></div></section>
 }
 
-function PublicHome({ authenticated, onChoose, onSignIn }: { authenticated: boolean; onChoose: () => void; onSignIn: () => void }) {
+function PublicHome({ authenticated, onChoose, onSignIn, onCreate, onNavigate }: { authenticated: boolean; onChoose: () => void; onSignIn: () => void; onCreate: () => void; onNavigate: (view: 'explore' | 'alerts' | 'marketplace' | 'services') => void }) {
   const title = authenticated ? 'Choose your community' : 'Know what’s happening around you.'
   const description = authenticated ? 'Select where you live or the community you want to follow to see updates near you.' : 'Connect with your community, discover local updates, trusted services, marketplace listings and important information near you.'
-  return <div className="public-home"><div className="page-hero explore-hero"><div><p className="eyebrow">NIGERIA-WIDE COMMUNITY PLATFORM</p><h1>{title}</h1><p>{description}</p><div className="hero-actions"><button className="join" onClick={onChoose}>{authenticated ? 'Choose community' : 'Join your community'}</button>{!authenticated && <button className="login" onClick={onSignIn}>Sign in</button>}</div></div><Compass size={36}/></div><div className="explore-section"><h2>Find your community</h2><p>Choose a state, LGA and area to explore local conversations without sharing your exact address.</p><button className="join" onClick={onChoose}>Explore communities</button><div className="now-grid public-features"><button><Siren/><b>Community updates</b><small>See local reports with their source and status.</small></button><button><ShoppingBag/><b>Marketplace</b><small>Buy and sell closer to home.</small></button><button><Wrench/><b>Trusted local services</b><small>Find providers recommended by neighbours.</small></button></div></div></div>
+  return <div className="public-home"><div className="page-hero explore-hero"><div><p className="eyebrow">NIGERIA-WIDE COMMUNITY PLATFORM</p><h1>{title}</h1><p>{description}</p><div className="hero-actions"><button className="join" onClick={onChoose}>{authenticated ? 'Choose community' : 'Join your community'}</button>{!authenticated && <button className="login" onClick={onSignIn}>Sign in</button>}<button className="login" onClick={onCreate}>Create a post</button></div></div><Compass size={36}/></div><div className="explore-section"><h2>Find your community</h2><p>Choose a state, LGA and area to explore local conversations without sharing your exact address.</p><button className="join" onClick={() => onNavigate('explore')}>Explore communities</button><div className="now-grid public-features"><button type="button" onClick={() => onNavigate('alerts')}><Siren/><b>Community updates</b><small>See local reports with their source and status.</small></button><button type="button" onClick={() => onNavigate('marketplace')}><ShoppingBag/><b>Marketplace</b><small>Buy and sell closer to home.</small></button><button type="button" onClick={() => onNavigate('services')}><Wrench/><b>Trusted local services</b><small>Find providers recommended by neighbours.</small></button></div></div></div>
 }
 
 function LocationOnboarding({ close, complete }: { close: () => void; complete: (value: { primaryCommunity: string; state: string; lga: string }) => void }) {
@@ -166,14 +197,15 @@ function LocationOnboarding({ close, complete }: { close: () => void; complete: 
   return <div className="modal-backdrop" role="dialog" aria-modal="true"><section className="onboarding-modal"><button className="modal-close" onClick={close}><X/></button><div className="onboarding-progress"><i className={step >= 1 ? 'done' : ''}/><i className={step >= 2 ? 'done' : ''}/><i className={step >= 3 ? 'done' : ''}/></div>{step === 1 ? <><p className="eyebrow">WELCOME TO AROUND ME</p><h2>Find your community</h2><p>Available across Nigeria. We’ll show your chosen area—not your exact home address.</p><button className="join wide" onClick={() => setStep(2)}>Choose a location</button></> : step === 2 ? <><p className="eyebrow">LOCATION</p><h2>Where are you based?</h2><p>Select a state and LGA. Ojo has expanded pilot area choices, but it is never preselected.</p><label>State<input list="nigerian-states" value={state} onChange={e => {setState(e.target.value); setLga(''); setArea('')}} placeholder="Choose or search a state"/><datalist id="nigerian-states">{NIGERIAN_STATES.map(value => <option key={value} value={value}/>)}</datalist></label><label>Local government area<input list={state === PILOT.state ? 'lagos-lgas' : undefined} value={lga} onChange={e => setLga(e.target.value)} placeholder="Search or enter your LGA"/>{state === PILOT.state && <datalist id="lagos-lgas"><option value={PILOT.lga}/></datalist>}</label><button className="join wide" disabled={!state || !lga} onClick={() => setStep(3)}>Continue</button><button className="link-button" onClick={() => setStep(1)}>Back</button></> : <><p className="eyebrow">YOUR AREA</p><h2>{isOjoPilot ? 'Where in Ojo are you?' : 'Choose your local area'}</h2><p>{isOjoPilot ? 'Ojo areas are available because you selected Lagos State and Ojo LGA.' : 'Use a recognised local area name. Exact residential addresses are never requested.'}</p><label>Area<input list={isOjoPilot ? 'ojo-areas' : undefined} value={area} onChange={e => setArea(e.target.value)} placeholder="Search area or neighbourhood"/>{isOjoPilot && <datalist id="ojo-areas">{PILOT.areas.map(value => <option key={value} value={value}/>)}</datalist>}</label><LocationPicker onSelect={location => { setArea(location.neighbourhood ?? location.city ?? location.town ?? location.district ?? location.state ?? area); setState(location.state ?? state); setLga(location.lga ?? lga) }}/><button className="join wide" disabled={!area} onClick={() => complete({primaryCommunity: area, state, lga})}>Explore {area}</button><button className="link-button" onClick={() => setStep(2)}>Back</button></>}</section></div>
 }
 
-function ExplorePage({ community, onNavigate, searchTerm, onChoose }: { community?: string; onNavigate: (view: 'community' | 'services' | 'marketplace' | 'alerts') => void; searchTerm: string; onChoose: () => void }) {
-  const results = [
-    ...(community ? [{ type: 'Community', title: community, detail: 'Selected neighbourhood', action: 'community' as const }] : [{ type: 'Community', title: 'Find your community', detail: 'Search anywhere in Nigeria', action: 'community' as const }]),
-    { type: 'Service', title: 'Recommend a local provider', detail: 'Ask neighbours once you choose a community.', action: 'services' as const },
-    { type: 'Marketplace', title: 'List something for sale', detail: 'Marketplace listings are scoped to a selected community.', action: 'marketplace' as const },
-    { type: 'Alert', title: 'Community reports', detail: 'Review source types and confirmations', action: 'alerts' as const }
-  ].filter(result => !searchTerm || `${result.type} ${result.title} ${result.detail}`.toLowerCase().includes(searchTerm.toLowerCase()))
-  return <div className="directory-page"><div className="page-hero explore-hero"><div><p className="eyebrow">DISCOVER AROUND YOU</p><h1>Explore nearby</h1><p>Communities, trusted local help, marketplace items, and resident-submitted updates.</p></div><Compass size={36}/></div><div className="explore-section">{!community && <button className="join" onClick={onChoose}>Choose a location</button>}<h2>Search results {searchTerm && <small>for “{searchTerm}”</small>}</h2>{results.map(result => <button className="explore-result card" key={result.title} onClick={() => result.action === 'community' && !community ? onChoose() : onNavigate(result.action)}><span>{result.type}</span><div><b>{result.title}</b><p>{result.detail}</p></div><ChevronRight size={18}/></button>)}{results.length === 0 && <div className="empty"><Search/><h3>No nearby matches</h3><p>Try another community, service or item name.</p></div>}</div></div>
+function ExplorePage({ community, onNavigate, searchTerm, onChoose, exploreLocation, setExploreLocation }: { community?: string; onNavigate: (view: 'community' | 'services' | 'marketplace' | 'alerts') => void; searchTerm: string; onChoose: () => void; exploreLocation: (typeof LAGOS_LGAS)[number] | null; setExploreLocation: (location: (typeof LAGOS_LGAS)[number] | null) => void }) {
+  const [query, setQuery] = useState(searchTerm)
+  const [mode, setMode] = useState<'map' | 'list'>('map')
+  const [mapMessage, setMapMessage] = useState('')
+  const matches = LAGOS_LGAS.filter(lga => lga.name.toLowerCase().includes(query.trim().toLowerCase()))
+  const mapMarkers = useMemo<PublicMapMarker[]>(() => LAGOS_LGAS.map(lga => ({ id: lga.slug, label: `${lga.name} LGA`, coordinates: lga.center, kind: 'community' })), [])
+  const center: MapCenter = exploreLocation?.center ?? NIGERIA_GEOGRAPHY.launchMarkets[0].defaultCenter
+  const chooseLga = (lga: (typeof LAGOS_LGAS)[number]) => { setExploreLocation(lga); setMapMessage(`Exploring ${lga.name}. This does not change your primary community.`) }
+  return <div className="directory-page"><div className="page-hero explore-hero"><div><p className="eyebrow">DISCOVER AROUND YOU</p><h1>{exploreLocation ? `Exploring ${exploreLocation.name}` : 'Explore Lagos'}</h1><p>Browse public communities and verified geographic locations. Exploring never joins or changes your primary community.</p></div><Compass size={36}/></div><div className="service-search"><Search size={19}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search Lagos LGAs, communities and places"/>{!community && <button className="join" onClick={onChoose}>Choose my community</button>}</div><div className="community-tabs"><button className={mode === 'map' ? 'chip active' : 'chip'} onClick={() => setMode('map')}>Map</button><button className={mode === 'list' ? 'chip active' : 'chip'} onClick={() => setMode('list')}>List</button>{exploreLocation && <button className="chip" onClick={() => setExploreLocation(null)}>Explore all Lagos</button>}</div>{mode === 'map' ? <section className="card explore-map">{mapboxAccessToken ? <MapView center={center} zoom={exploreLocation ? 12 : 10} markers={mapMarkers} onMarkerSelect={marker => { const lga = LAGOS_LGAS.find(item => item.slug === marker.id); if (lga) chooseLga(lga) }} onSelect={() => setMapMessage('No recent community activity here yet. Select a community marker or search Lagos to continue.')}/> : <div className="empty"><MapPin/><h3>Map provider/API key required.</h3><p>Location browsing remains available in list mode.</p></div>}<p className="muted">{mapMessage || 'Community markers are verified geographic locations. No incident markers are shown without public activity data.'}</p></section> : <section className="explore-section"><h2>Lagos LGAs</h2><p>20 Local Government Areas are available. LCDAs are intentionally separate.</p>{matches.map(lga => <button className="explore-result card" key={lga.slug} onClick={() => chooseLga(lga)}><span>Community</span><div><b>{lga.name}</b><p>{lga.name === 'Ojo' ? 'Launch community with the deepest initial local coverage.' : 'Public geographic location — activity appears as it is added.'}</p></div><ChevronRight size={18}/></button>)}{matches.length === 0 && <div className="empty"><Search/><h3>No Lagos LGA matches</h3><p>Try another LGA or use the Nigeria-wide location picker.</p></div>}</section>}<section className="explore-section"><h2>Public discovery</h2><div className="now-grid"><button onClick={() => onNavigate('services')}><Wrench/><b>Services</b><small>Browse public local providers.</small></button><button onClick={() => onNavigate('marketplace')}><ShoppingBag/><b>Marketplace</b><small>Browse public local listings.</small></button><button onClick={() => onNavigate('alerts')}><Siren/><b>Alerts</b><small>Review public reports and their status.</small></button></div></section></div>
 }
 
 function ProfilePage({ userName, community, posts, onOnboard, onLogout }: { userName: string; community?: string; posts: Post[]; onOnboard: () => void; onLogout: () => void }) {
