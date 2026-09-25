@@ -16,6 +16,7 @@ import type { NotificationService } from './notifications/service'
 import { createNotificationRoutes } from './routes/notifications'
 import { createPostRoutes } from './routes/posts'
 import { createCommunityRoutes } from './routes/communities'
+import { createLocationRoutes } from './routes/locations'
 import type { BackgroundJobQueue } from './jobs/job-queue'
 
 export function createApiApp(dependencies: { storage?: StorageProvider; env?: ServerEnv; email?: TransactionalEmailService; ai?: AroundMeAiService; weather?: AroundMeWeatherService; cache?: ConfiguredCache; rateLimitStore?: RateLimitStore; notifications?: NotificationService; jobs?: BackgroundJobQueue } = {}) {
@@ -37,6 +38,7 @@ export function createApiApp(dependencies: { storage?: StorageProvider; env?: Se
   if (dependencies.env) app.route('/auth', createAuthRoutes({ env: dependencies.env, email: dependencies.email, rateLimitStore: dependencies.rateLimitStore }))
   if (dependencies.env && dependencies.notifications) app.route('/notifications', createNotificationRoutes({ env: dependencies.env, notifications: dependencies.notifications }))
   if (dependencies.env) app.route('/posts', createPostRoutes({ env: dependencies.env, notifications: dependencies.notifications, jobs: dependencies.jobs }))
+  if (dependencies.env) app.route('/locations', createLocationRoutes())
   if (dependencies.env) app.route('/communities', createCommunityRoutes({ env: dependencies.env }))
   if (dependencies.weather) app.route('/weather', createWeatherRoutes(dependencies.weather))
   app.notFound(context => context.json({ error: { code: 'NOT_FOUND', message: 'Route not found' } }, 404))
