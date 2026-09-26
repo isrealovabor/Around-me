@@ -176,7 +176,7 @@ export default function App() {
     <nav className="mobile-bottom" aria-label="Mobile navigation"><button className={view === 'home' ? 'active' : ''} onClick={() => setView('home')}><Home/><span>Home</span></button><button className={view === 'explore' ? 'active' : ''} onClick={() => setView('explore')}><Compass/><span>Explore</span></button><button className="mobile-post" onClick={beginCreatePost}><Plus/><span>Post</span></button><button className={view === 'alerts' ? 'active' : ''} onClick={() => setView('alerts')}><Siren/><span>Alerts</span></button><button className={view === 'profile' ? 'active' : ''} onClick={() => authenticated ? setView('profile') : (setAuthMode('sign in'), setShowAuth(true))}><UserRound/><span>Profile</span></button></nav>
     {notice && <div className="toast"><CheckCircle2 size={19}/>{notice}</div>}
     {showAuth && <AuthModal mode={authMode} deepLink={authDeepLink} close={() => {setShowAuth(false);setAuthDeepLink(undefined)}} onModeChange={setAuthMode} onAuthenticated={async () => { const user = await refreshSession(); setShowAuth(false); if (!user?.primaryCommunity) setShowOnboarding(true) }} />}
-    {showOnboarding && <DatabaseLocationOnboarding close={() => setShowOnboarding(false)} complete={async ({ primaryCommunity, state, lga }) => { if (currentUser) { await authRequest('/auth/session/location', { method: 'PATCH', body: JSON.stringify({ community: primaryCommunity, state, lga }) }); await refreshSession() } else setSelectedCommunity({ name: primaryCommunity, location: { name: lga || primaryCommunity, parentName: state || undefined } }); setShowOnboarding(false); setView('home'); setNotice(`Showing updates for ${primaryCommunity}.`) }} />}
+    {showOnboarding && <ResponsiveLocationOnboarding close={() => setShowOnboarding(false)} complete={async ({ primaryCommunity, state, lga }) => { if (currentUser) { await authRequest('/auth/session/location', { method: 'PATCH', body: JSON.stringify({ community: primaryCommunity, state, lga }) }); await refreshSession() } else setSelectedCommunity({ name: primaryCommunity, location: { name: lga || primaryCommunity, parentName: state || undefined } }); setShowOnboarding(false); setView('home'); setNotice(`Showing updates for ${primaryCommunity}.`) }} />}
   </div>
 }
 
@@ -196,6 +196,42 @@ async function readLocationOptions(path: string): Promise<LocationOption[]> {
   if (!response.ok) throw new Error('Location data is temporarily unavailable.')
   const payload = await response.json() as { locations?: LocationOption[] }
   return payload.locations ?? []
+}
+
+function LocationOptionPicker({ label, value, options, placeholder, loading, error, emptyMessage, disabled, onChoose, onRetry, display = item => item.name }: { label: string; value: LocationOption | null; options: LocationOption[]; placeholder: string; loading?: boolean; error?: string; emptyMessage?: string; disabled?: boolean; onChoose: (item: LocationOption) => void; onRetry?: () => void; display?: (item: LocationOption) => string }) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const matches = options.filter(item => display(item).toLowerCase().includes(query.trim().toLowerCase()))
+  const choose = (item: LocationOption) => { onChoose(item); setQuery(''); setOpen(false) }
+  const close = () => { setOpen(false); setQuery('') }
+  return <div className="location-option-picker"><span className="location-picker-label">{label}</span><button type="button" className="location-select-trigger" disabled={disabled} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)}>{value ? display(value) : loading ? `Loading ${label}s…` : placeholder}<ChevronDown size={18}/></button>{open && <div className="location-option-sheet" role="dialog" aria-label={`Select ${label}`} onKeyDown={event => { if (event.key === 'Escape') close() }}><div className="location-option-sheet-head"><b>Select {label}</b><button type="button" aria-label={`Close ${label} options`} onClick={close}><X size={20}/></button></div><label className="location-option-search"><Search size={17}/><input autoFocus value={query} onChange={event => setQuery(event.target.value)} placeholder={`Search ${label.toLowerCase()}`}/></label><div className="location-option-list" role="listbox" aria-label={`${label} options`}>{loading ? <p>Loading {label.toLowerCase()}s…</p> : error ? <div className="location-option-state"><p>{error}</p>{onRetry && <button type="button" onClick={onRetry}>Try again</button>}</div> : matches.length ? matches.map(item => <button type="button" key={item.id} role="option" aria-selected={value?.id === item.id} onClick={() => choose(item)}><span>{display(item)}</span>{value?.id === item.id && <Check size={17}/>}</button>) : <p>{emptyMessage ?? `No ${label.toLowerCase()}s match your search.`}</p>}</div></div>}</div>
+}
+
+function ResponsiveLocationOnboarding({ close, complete }: { close: () => void; complete: (value: { primaryCommunity: string; state: string; lga: string }) => void }) {
+  const [step, setStep] = useState(1)
+  const [states, setStates] = useState<LocationOption[]>([])
+  const [lgas, setLgas] = useState<LocationOption[]>([])
+  const [areas, setAreas] = useState<LocationOption[]>([])
+  const [state, setState] = useState<LocationOption | null>(null)
+  const [lga, setLga] = useState<LocationOption | null>(null)
+  const [area, setArea] = useState<LocationOption | null>(null)
+  const [statesLoading, setStatesLoading] = useState(true)
+  const [lgasLoading, setLgasLoading] = useState(false)
+  const [areasLoading, setAreasLoading] = useState(false)
+  const [statesError, setStatesError] = useState('')
+  const [lgasError, setLgasError] = useState('')
+  const [areasError, setAreasError] = useState('')
+
+  const loadStates = () => { setStatesLoading(true); setStatesError(''); void readLocationOptions('/locations/states').then(setStates).catch(() => setStatesError("Couldn't load states. Try again.")).finally(() => setStatesLoading(false)) }
+  const loadLgas = (stateId: string) => { setLgasLoading(true); setLgasError(''); void readLocationOptions(`/locations/states/${encodeURIComponent(stateId)}/lgas`).then(setLgas).catch(() => setLgasError("Couldn't load LGAs. Try again.")).finally(() => setLgasLoading(false)) }
+  const loadAreas = (lgaId: string) => { setAreasLoading(true); setAreasError(''); void readLocationOptions(`/locations/lgas/${encodeURIComponent(lgaId)}/areas`).then(setAreas).catch(() => setAreasError("Couldn't load communities. Try again.")).finally(() => setAreasLoading(false)) }
+  useEffect(loadStates, [])
+  useEffect(() => { setLga(null); setArea(null); setLgas([]); setAreas([]); if (state) loadLgas(state.id) }, [state?.id])
+  useEffect(() => { setArea(null); setAreas([]); if (lga) loadAreas(lga.id) }, [lga?.id])
+
+  const hasAreas = areas.length > 0
+  const communityName = area?.name ?? lga?.name ?? ''
+  return <div className="modal-backdrop location-modal-backdrop" role="dialog" aria-modal="true"><section className="onboarding-modal responsive-location-modal"><button className="modal-close" onClick={close} aria-label="Close location selector"><X/></button><header className="location-modal-header"><p className="eyebrow">LOCATION</p><h2>{step === 1 ? 'Find your community' : step === 2 ? 'Choose your location' : hasAreas ? `Where in ${displayLgaName(lga?.name ?? '')}?` : `Explore ${displayLgaName(lga?.name ?? '')}`}</h2></header><div className="onboarding-progress"><i className={step >= 1 ? 'done' : ''}/><i className={step >= 2 ? 'done' : ''}/><i className={step >= 3 ? 'done' : ''}/></div>{step === 1 ? <div className="location-modal-content"><p>Available across Nigeria. We’ll show your chosen area—not your exact home address.</p><button className="join wide" onClick={() => setStep(2)}>Choose a location</button></div> : step === 2 ? <div className="location-modal-content"><p>Select your state and local government area to find your community.</p><LocationOptionPicker label="State" value={state} options={states} placeholder="Search or select your state" loading={statesLoading} error={statesError} onChoose={setState} onRetry={loadStates}/><LocationOptionPicker label="LGA" value={lga} options={lgas} placeholder="Search or select your LGA" loading={lgasLoading} error={lgasError} emptyMessage={state && !lgasLoading ? "We're still adding communities in this state." : undefined} disabled={!state} onChoose={setLga} onRetry={() => state && loadLgas(state.id)} display={item => displayLgaName(item.name)}/><div className="location-modal-actions"><button className="link-button" onClick={() => setStep(1)}>Back</button><button className="join" disabled={!state || !lga || lgasLoading} onClick={() => setStep(3)}>Continue</button></div></div> : <div className="location-modal-content"><p>{hasAreas ? 'Select an available local area. Exact residential addresses are never requested.' : 'More local communities are being added. You can continue with this LGA as your community context.'}</p>{hasAreas && <LocationOptionPicker label="Area or community" value={area} options={areas} placeholder="Search or select an area" loading={areasLoading} error={areasError} onChoose={setArea} onRetry={() => lga && loadAreas(lga.id)}/>}<div className="location-modal-actions"><button className="link-button" onClick={() => setStep(2)}>Back</button><button className="join" disabled={!lga || (hasAreas && !area) || areasLoading} onClick={() => complete({ primaryCommunity: communityName, state: state!.name, lga: lga!.name })}>Explore {area?.name ?? displayLgaName(lga?.name ?? '')}</button></div></div>}</section></div>
 }
 
 /** Database-driven onboarding: state, LGA and area records are never derived from the Ojo pilot config. */
